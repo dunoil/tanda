@@ -4,7 +4,7 @@ import {
   normalizeQuote,
   type RawTextileQuote,
 } from "@tanda/textile";
-import { createApp } from "./index.js";
+import { createApp, DEFAULT_PAY_TO, resolvePayTo } from "./index.js";
 import { MockSelfVerifier, mockSignRequest } from "./self.js";
 
 const FIXTURE: RawTextileQuote = {
@@ -35,6 +35,26 @@ function appWithMocks() {
   });
   return { app, account };
 }
+
+describe("desk payTo resolution", () => {
+  it("defaults to the enrolled agent wallet when SELLER_PAY_TO is unset", () => {
+    expect(resolvePayTo({} as NodeJS.ProcessEnv)).toBe(DEFAULT_PAY_TO);
+  });
+
+  it("uses SELLER_PAY_TO when set, checksummed", () => {
+    const env = {
+      SELLER_PAY_TO: "0x7d6bc7c0df2d312e6137e78f99107db6aff1d830",
+    } as NodeJS.ProcessEnv;
+    expect(resolvePayTo(env)).toBe(
+      "0x7D6bc7c0DF2d312e6137E78F99107db6Aff1d830",
+    );
+  });
+
+  it("throws on an invalid SELLER_PAY_TO instead of falling back silently", () => {
+    const env = { SELLER_PAY_TO: "not-an-address" } as NodeJS.ProcessEnv;
+    expect(() => resolvePayTo(env)).toThrow();
+  });
+});
 
 describe("desk app", () => {
   it("health reports the chain, the tag, and readiness flags", async () => {

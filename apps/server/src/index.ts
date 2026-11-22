@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
+import { getAddress } from "viem";
 import { paymentMiddleware } from "@x402/hono";
 import { ATTRIBUTION_CODE, assertAttributionCode } from "@tanda/wallet";
 import { IDRX_ADDRESS, USDT_ADDRESS } from "@tanda/money";
@@ -38,6 +39,23 @@ if (
 /** The desk payTo defaults to the single enrolled agent wallet. */
 export const DEFAULT_PAY_TO =
   "0xed328f847eF33f35148513DCEFB10069FcE53725" as const;
+
+/**
+ * Resolve the desk payTo: an explicit option wins, then the
+ * SELLER_PAY_TO env var (the pattern documented in .env.example),
+ * then the enrolled agent wallet. Since 22 Nov 2026 the live desk
+ * points SELLER_PAY_TO at the separate treasury wallet: the Celo
+ * facilitator refuses settlements where payer and payTo are the same
+ * address, and the agent wallet is the buyer (EVIDENCE.md section 9).
+ * An invalid env value is a boot error, never a silent fallback.
+ */
+export function resolvePayTo(
+  env: NodeJS.ProcessEnv = process.env,
+): `0x${string}` {
+  const raw = env.SELLER_PAY_TO;
+  if (!raw) return DEFAULT_PAY_TO;
+  return getAddress(raw);
+}
 
 export interface DeskAppOptions {
   /** Injected in tests. Defaults to the verifier for the configured Self mode. */
@@ -137,7 +155,7 @@ export function createApp(options: DeskAppOptions = {}) {
 
   if (options.x402Enabled !== false) {
     const routes = buildDeskRoutes({
-      payTo: options.payTo ?? DEFAULT_PAY_TO,
+      payTo: options.payTo ?? resolvePayTo(),
       price: options.price ?? process.env.DESK_PRICE_USDT ?? "0.10",
       network,
     });
