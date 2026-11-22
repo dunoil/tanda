@@ -1,0 +1,21 @@
+{
+  "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+  "name": "Tanda Payout Desk Agent",
+  "description": "Buyer agent for the Tanda payout desk: pays Indonesian freelancers in USDT over x402, gated by a Self Agent ID human proof, settled to IDRX over Textile FX.",
+  "services": [
+    {
+      "name": "web",
+      "endpoint": "https://dunoil.github.io/tanda/"
+    },
+    {
+      "name": "A2A",
+      "endpoint": "https://tanda-desk.onrender.com/desk/order"
+    }
+  ],
+  "x402Support": true,
+  "active": true,
+  "registrations": [],
+  "supportedTrust": [
+    "reputation"
+  ]
+}
