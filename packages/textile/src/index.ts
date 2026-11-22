@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
+  encodeFunctionData,
+  erc20Abi,
   formatUnits,
   parseUnits,
   toHex,
@@ -7,7 +9,13 @@ import {
   type Account,
   type Address,
   type Hex,
+  type PublicClient,
 } from "viem";
+import {
+  getAttributionSuffix,
+  verifyTaggedTx,
+  type TaggedWalletClient,
+} from "@tanda/wallet";
 import {
   IDRX_ADDRESS,
   USDT_ADDRESS,
@@ -38,11 +46,18 @@ import {
  *   token amount itself; it only moves raw strings across the wire and
  *   hands them to that module.
  *
- * Deliberate boundary: this prep build QUOTES ONLY. It never submits an
- * RFQ for settlement and never broadcasts a conversion transaction.
- * Execution lands with the payout worker after the wallet is funded
- * (see STATUS.md in this package). `submitQuote` below exists only to
- * fail loudly if anything tries.
+ * Execution: `submitQuote` settles a firm quote on chain, but only
+ * behind an explicit opt-in. Unless the environment variable
+ * TEXTILE_EXECUTION_ENABLED is set to "true" (or "1"), or the client is
+ * constructed with `executionEnabled: true`, submitQuote throws and
+ * nothing can settle. With the flag on it follows the documented RFQ
+ * v2 execution flow: approve `takerPays` of the sell token to the
+ * quote's reactor when the allowance is short (resetting a nonzero
+ * allowance to zero first, USDT style), broadcast `transactions.swap`
+ * from the taker wallet, then report the hash to POST /v2/rfq/{id}/submit
+ * with the X-Rfq-Claim header. Every broadcast goes through the tagged
+ * wallet client from @tanda/wallet, is simulated with the exact tagged
+ * bytes before sending, and is verifyTx checked after landing.
  */
 
 export const TEXTILE_API_BASE = "https://api.textilecredit.com/v2";
@@ -81,6 +96,11 @@ export interface RawTextileQuote {
   status?: string;
   sellAmount?: string;
   buyAmount?: string;
+  takerPays?: string;
+  reactor?: string;
+  reason?: string;
+  orderDeadline?: string;
+  taker?: string;
   feeAmount?: string;
   feeBps?: number;
   expiresAt?: string | number;
@@ -132,9 +152,15 @@ export class TextileApiError extends Error {
 }
 
 function unwrap(raw: RawTextileQuote): RawTextileQuote {
-  if (raw.quote && typeof raw.quote === "object") return raw.quote;
-  if (raw.data && typeof raw.data === "object") return raw.data;
-  return raw;
+  const envelope =
+    raw.data && typeof raw.data === "object" ? raw.data : raw;
+  // Firm quote responses nest the amounts under `quote`; previews carry
+  // them at the data level. Merge quote fields over the envelope so both
+  // shapes read the same.
+  if (envelope.quote && typeof envelope.quote === "object") {
+    return { ...envelope, ...envelope.quote };
+  }
+  return envelope;
 }
 
 function isNoQuote(raw: RawTextileQuote): boolean {
@@ -200,22 +226,177 @@ export function meetsFloorRate(
   return quote.rateScaled >= floorScaled;
 }
 
+/** One ready-to-broadcast transaction as returned by the RFQ API. */
+export interface TextileTxRequest {
+  to: Address;
+  data: Hex;
+  value: string;
+  chainId?: number;
+}
+
+/**
+ * A firm quote in executable form: everything the settlement step needs,
+ * parsed from the documented POST /v2/rfq/request response envelope
+ * (`data.rfqId`, `data.claimToken`, `data.quote{...}`, `data.transactions`).
+ * The claim token comes back exactly once; it authorizes submit, status
+ * and cancel for this RFQ via the X-Rfq-Claim header.
+ */
+export interface ExecutableQuote {
+  rfqId: string;
+  claimToken: string;
+  status: string;
+  /** The reactor the taker approves and the swap executes against. */
+  reactor: Address;
+  /** Exactly what leaves the taker wallet, sell token raw units, fee included. */
+  takerPaysRaw: bigint;
+  /** What the taker receives, buy token raw units. */
+  buyAmountRaw: bigint;
+  feeAmountRaw: bigint | null;
+  /** Accept cutoff: after this instant the API stops counting the quote. */
+  expiresAt: string | null;
+  /** Past this instant the signed orders themselves can no longer settle. */
+  orderDeadline: string | null;
+  transactions: {
+    approval?: TextileTxRequest;
+    swap: TextileTxRequest;
+  };
+  normalized: NormalizedQuote;
+  raw: RawTextileQuote;
+}
+
+/**
+ * Parse the full firm quote envelope into executable form. Throws
+ * TextileNoQuoteError on a no_quote response and a plain Error when the
+ * response is malformed (no swap calldata, no claim token, a reactor
+ * other than the known Celo LimitOrderReactor): execution must never
+ * improvise around a response it does not recognize.
+ */
+export function parseExecutableQuote(
+  rawInput: RawTextileQuote,
+  input: QuoteRequest,
+): ExecutableQuote {
+  const data =
+    rawInput.data && typeof rawInput.data === "object"
+      ? rawInput.data
+      : rawInput;
+  const status = (data.status ?? "").toLowerCase();
+  if (status === "no_quote" || status === "noquote") {
+    const reason =
+      typeof data.reason === "string" ? data.reason : "no_valid_quote";
+    throw new TextileNoQuoteError(
+      `Textile FX returned no quote for this size (reason: ${reason}).`,
+    );
+  }
+  const q =
+    data.quote && typeof data.quote === "object" ? data.quote : data;
+  const transactions = data.transactions as
+    | { approval?: TextileTxRequest; swap?: TextileTxRequest }
+    | undefined;
+  if (!transactions?.swap?.to || !transactions?.swap?.data) {
+    throw new Error(
+      "Firm quote response carried no transactions.swap calldata. Refusing to execute.",
+    );
+  }
+  const rfqId = data.rfqId ?? data.id;
+  const claimToken = data.claimToken;
+  if (!rfqId || !claimToken) {
+    throw new Error(
+      "Firm quote response carried no rfqId or claimToken. Refusing to execute.",
+    );
+  }
+  const reactor = q.reactor as Address | undefined;
+  if (!reactor) {
+    throw new Error("Firm quote response carried no reactor. Refusing to execute.");
+  }
+  if (reactor.toLowerCase() !== TEXTILE_LIMIT_ORDER_REACTOR.toLowerCase()) {
+    throw new Error(
+      `Firm quote reactor ${reactor} is not the known Celo LimitOrderReactor ` +
+        `${TEXTILE_LIMIT_ORDER_REACTOR}. Refusing to approve or execute against it.`,
+    );
+  }
+  if (!q.takerPays || !q.buyAmount) {
+    throw new Error(
+      "Firm quote response carried no takerPays or buyAmount. Refusing to execute.",
+    );
+  }
+  return {
+    rfqId: String(rfqId),
+    claimToken: String(claimToken),
+    status: status || "quoted",
+    reactor,
+    takerPaysRaw: BigInt(q.takerPays),
+    buyAmountRaw: BigInt(q.buyAmount),
+    feeAmountRaw: q.feeAmount ? BigInt(q.feeAmount) : null,
+    expiresAt: (q.expiresAt as string | undefined) ?? null,
+    orderDeadline: (q.orderDeadline as string | undefined) ?? null,
+    transactions: {
+      ...(transactions.approval ? { approval: transactions.approval } : {}),
+      swap: transactions.swap,
+    },
+    normalized: normalizeQuote(rawInput, input),
+    raw: data,
+  };
+}
+
 export interface TextileClientOptions {
   baseUrl?: string;
   fetchFn?: FetchFn;
   /** Optional partner API key. Quotes work without one; a key only replaces the taker proof. */
   apiKey?: string;
+  /**
+   * Execution opt-in override. When omitted, submitQuote reads the
+   * TEXTILE_EXECUTION_ENABLED environment variable at call time.
+   */
+  executionEnabled?: boolean;
+}
+
+/** The environment variable that opts in to on-chain execution. Default: off. */
+export const TEXTILE_EXECUTION_ENV = "TEXTILE_EXECUTION_ENABLED";
+
+/** True only when the execution opt-in is explicitly switched on. */
+export function isTextileExecutionEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const value = (env[TEXTILE_EXECUTION_ENV] ?? "").toLowerCase();
+  return value === "true" || value === "1";
+}
+
+/** The chain clients submitQuote broadcasts and verifies through. */
+export interface SubmitQuoteClients {
+  /** Must be the tagged client from @tanda/wallet for the taker account. */
+  walletClient: TaggedWalletClient;
+  publicClient: PublicClient;
+  /**
+   * Post-broadcast tag check. Defaults to the real verifyTx wrapper from
+   * @tanda/wallet; tests inject a stub because verifyTx reads the chain.
+   */
+  verifyTaggedTxFn?: (
+    publicClient: PublicClient,
+    hash: Hex,
+  ) => Promise<{ tagged: boolean; codes: string[] }>;
+}
+
+export interface SubmitQuoteResult {
+  rfqId: string;
+  /** Approval transactions broadcast, in order (empty when allowance already covered). */
+  approvalHashes: Hex[];
+  /** The settlement (swap) transaction hash. */
+  swapHash: Hex;
+  /** Status the API reported for the RFQ after the hash report, when readable. */
+  rfqStatus: string | null;
 }
 
 export class TextileQuoteClient {
   private readonly baseUrl: string;
   private readonly fetchFn: FetchFn;
   private readonly apiKey?: string;
+  private readonly executionEnabledOverride?: boolean;
 
   constructor(options: TextileClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? TEXTILE_API_BASE;
     this.fetchFn = options.fetchFn ?? (globalThis.fetch as FetchFn);
     this.apiKey = options.apiKey;
+    this.executionEnabledOverride = options.executionEnabled;
   }
 
   private headers(): Record<string, string> {
@@ -240,16 +421,17 @@ export class TextileQuoteClient {
   }
 
   /**
-   * Firm quote. POST /v2/rfq/request, following the docs pattern exactly:
-   * send unsigned first, and only when the API answers 401 with reason
+   * The firm quote POST, shared by requestFirmQuote and
+   * requestExecutableQuote. Follows the docs pattern exactly: send
+   * unsigned first, and only when the API answers 401 with reason
    * proof_of_control_required, sign the TakerControl challenge with the
-   * taker wallet and retry once. A firm quote locks maker inventory for
-   * the taker until it expires; it moves no funds by itself, and this
-   * client never submits it for settlement.
+   * taker wallet and retry once. Returns the parsed response envelope.
+   * A firm quote locks maker inventory for the taker until it expires;
+   * it moves no funds by itself.
    */
-  async requestFirmQuote(
+  private async postFirmQuote(
     input: QuoteRequest & { account: Account },
-  ): Promise<NormalizedQuote> {
+  ): Promise<RawTextileQuote> {
     const body = buildQuoteWireBody({ ...input, taker: input.account.address });
     const send = async (extra: Record<string, unknown> = {}) => {
       return this.fetchFn(`${this.baseUrl}/rfq/request`, {
@@ -276,21 +458,213 @@ export class TextileQuoteClient {
     if (!res.ok) {
       throw new TextileApiError(res.status, await res.text());
     }
-    const raw = (await res.json()) as RawTextileQuote;
+    return (await res.json()) as RawTextileQuote;
+  }
+
+  /** Firm quote, normalized desk terms only. See postFirmQuote for the flow. */
+  async requestFirmQuote(
+    input: QuoteRequest & { account: Account },
+  ): Promise<NormalizedQuote> {
+    const raw = await this.postFirmQuote(input);
     return normalizeQuote(raw, input);
   }
 
   /**
-   * Execution is deliberately not implemented in this prep build.
-   * Submitting a firm quote settles a real conversion on mainnet, which
-   * is blocked until the agent wallet is funded and the payout worker
-   * lands. See STATUS.md.
+   * Firm quote in executable form: the rfqId, claim token, reactor,
+   * takerPays and the ready calldata (transactions.approval and
+   * transactions.swap) that submitQuote broadcasts.
    */
-  async submitQuote(): Promise<never> {
-    throw new Error(
-      "Textile execution is disabled in this prep build: quotes only, no conversion. " +
-        "Settlement lands with the payout worker after wallet funding (see STATUS.md).",
-    );
+  async requestExecutableQuote(
+    input: QuoteRequest & { account: Account },
+  ): Promise<ExecutableQuote> {
+    const raw = await this.postFirmQuote(input);
+    return parseExecutableQuote(raw, input);
+  }
+
+  private claimHeaders(claimToken: string): Record<string, string> {
+    return {
+      "Content-Type": "application/json",
+      "X-Rfq-Claim": claimToken,
+      ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+    };
+  }
+
+  /** Read an RFQ's status. Needs the claim token (or the partner key). */
+  async getRfqStatus(quote: {
+    rfqId: string;
+    claimToken: string;
+  }): Promise<string | null> {
+    const res = await this.fetchFn(`${this.baseUrl}/rfq/${quote.rfqId}`, {
+      method: "GET",
+      headers: this.claimHeaders(quote.claimToken),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+      data?: { status?: string };
+      status?: string;
+    };
+    return body.data?.status ?? body.status ?? null;
+  }
+
+  /**
+   * Settle a firm quote on chain, following the documented RFQ v2
+   * execution flow. DISABLED unless execution was opted in (the
+   * TEXTILE_EXECUTION_ENABLED environment variable or the client
+   * option); with the flag off this throws before touching anything.
+   *
+   * With the flag on:
+   * 1. Refuse when the quote's accept cutoff (expiresAt) has passed.
+   * 2. Read the taker's sell token allowance to the quote's reactor.
+   *    When short, broadcast the approval (a zero reset first when a
+   *    nonzero allowance exists, USDT style, then the API's approval
+   *    calldata or a locally built approve of takerPays) and wait for
+   *    each receipt before continuing: the reactor pulls the sell
+   *    token inside the swap, so the approval must land first.
+   * 3. Re-check the cutoff, then broadcast transactions.swap exactly
+   *    as returned, from the taker wallet.
+   * 4. Report the swap hash to POST /v2/rfq/{id}/submit with the
+   *    X-Rfq-Claim header and read the RFQ status back. Reporting is
+   *    a courtesy per the docs (settlement reconciles from chain), so
+   *    a failed report does not fail the settlement; the status read
+   *    result is returned either way.
+   *
+   * Every broadcast goes through the injected tagged wallet client, is
+   * simulated first with the exact bytes that will be sent (calldata
+   * plus the ERC-8021 attribution suffix the tagged client appends),
+   * and is verifyTx checked after landing: an untagged or reverted
+   * transaction throws.
+   */
+  async submitQuote(input: {
+    quote: ExecutableQuote;
+    account: Account;
+    clients: SubmitQuoteClients;
+    sellToken?: Address;
+  }): Promise<SubmitQuoteResult> {
+    const enabled =
+      this.executionEnabledOverride ?? isTextileExecutionEnabled();
+    if (!enabled) {
+      throw new Error(
+        "Textile execution is disabled: submitQuote settles a real conversion " +
+          `on mainnet and needs the explicit opt-in (${TEXTILE_EXECUTION_ENV}=true ` +
+          "or the executionEnabled client option). Quotes only until then.",
+      );
+    }
+    const { quote, account, clients } = input;
+    const sellToken = input.sellToken ?? USDT_ADDRESS;
+    const { walletClient, publicClient } = clients;
+    const verifyFn =
+      clients.verifyTaggedTxFn ??
+      ((client: PublicClient, hash: Hex) =>
+        verifyTaggedTx(client as never, hash));
+    const suffix = getAttributionSuffix();
+
+    const quoteTaker = quote.normalized.raw.taker;
+    if (
+      typeof quoteTaker === "string" &&
+      quoteTaker.toLowerCase() !== account.address.toLowerCase()
+    ) {
+      throw new Error(
+        `Quote taker ${quoteTaker} does not match the settling account ${account.address}. Refusing.`,
+      );
+    }
+    const assertNotExpired = () => {
+      if (quote.expiresAt && Date.now() >= Date.parse(quote.expiresAt)) {
+        throw new Error(
+          `Firm quote ${quote.rfqId} passed its accept cutoff (${quote.expiresAt}). ` +
+            "Request a new quote instead of broadcasting.",
+        );
+      }
+    };
+    assertNotExpired();
+
+    const broadcast = async (
+      label: string,
+      tx: { to: Address; data: Hex; value: bigint },
+    ): Promise<Hex> => {
+      // Simulate the exact tagged bytes the wallet client will send.
+      await publicClient.call({
+        account,
+        to: tx.to,
+        data: `${tx.data}${suffix.slice(2)}` as Hex,
+        value: tx.value,
+      });
+      const hash = await walletClient.sendTransaction({
+        to: tx.to,
+        data: tx.data,
+        value: tx.value,
+      });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") {
+        throw new Error(`${label} transaction ${hash} reverted on chain.`);
+      }
+      const tag = await verifyFn(publicClient, hash);
+      if (!tag.tagged) {
+        throw new Error(
+          `${label} transaction ${hash} landed WITHOUT the attribution tag. ` +
+            "It cannot be credited; stopping here.",
+        );
+      }
+      return hash;
+    };
+
+    const approvalHashes: Hex[] = [];
+    const allowance = await publicClient.readContract({
+      address: sellToken,
+      abi: erc20Abi,
+      functionName: "allowance",
+      args: [account.address, quote.reactor],
+    });
+    if (allowance < quote.takerPaysRaw) {
+      if (allowance > 0n) {
+        // USDT-style tokens reject approve(nonzero -> nonzero). Reset first.
+        approvalHashes.push(
+          await broadcast("approval reset", {
+            to: sellToken,
+            data: encodeFunctionData({
+              abi: erc20Abi,
+              functionName: "approve",
+              args: [quote.reactor, 0n],
+            }),
+            value: 0n,
+          }),
+        );
+      }
+      const approval = quote.transactions.approval;
+      approvalHashes.push(
+        await broadcast("approval", {
+          to: approval?.to ?? sellToken,
+          data:
+            approval?.data ??
+            encodeFunctionData({
+              abi: erc20Abi,
+              functionName: "approve",
+              args: [quote.reactor, quote.takerPaysRaw],
+            }),
+          value: approval ? BigInt(approval.value) : 0n,
+        }),
+      );
+    }
+
+    assertNotExpired();
+    const swap = quote.transactions.swap;
+    const swapHash = await broadcast("swap", {
+      to: swap.to,
+      data: swap.data,
+      value: BigInt(swap.value),
+    });
+
+    let rfqStatus: string | null = null;
+    try {
+      await this.fetchFn(`${this.baseUrl}/rfq/${quote.rfqId}/submit`, {
+        method: "POST",
+        headers: this.claimHeaders(quote.claimToken),
+        body: JSON.stringify({ txHash: swapHash }),
+      });
+      rfqStatus = await this.getRfqStatus(quote);
+    } catch {
+      rfqStatus = null;
+    }
+    return { rfqId: quote.rfqId, approvalHashes, swapHash, rfqStatus };
   }
 }
 

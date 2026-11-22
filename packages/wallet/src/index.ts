@@ -101,6 +101,9 @@ export function createTaggedWalletClient(options: TaggedWalletOptions) {
   }).extend(withAttribution(code));
 }
 
+/** The tagged wallet client type produced by createTaggedWalletClient. */
+export type TaggedWalletClient = ReturnType<typeof createTaggedWalletClient>;
+
 export function createCeloPublicClient(
   rpcUrl: string = DEFAULT_CELO_RPC_URL,
 ) {
