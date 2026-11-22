@@ -1,5 +1,7 @@
 {
   "dependencies": {
+    "@selfxyz/common": "^0.0.7",
+    "@selfxyz/qrcode": "^1.0.11",
     "@tanda/money": "*",
     "@tanda/wallet": "*",
     "@x402/evm": "^2.32.0",
@@ -15,6 +17,7 @@
   "private": true,
   "scripts": {
     "start": "tsx src/index.ts",
+    "self:link": "tsx scripts/self-register-link.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
