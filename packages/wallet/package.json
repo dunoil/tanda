@@ -1,0 +1,1 @@
+{"dependencies":{"@celo/attribution-tags":"^0.5.0","viem":"^2.21.0"},"devDependencies":{"vitest":"^2.1.8"},"exports":{".":"./src/index.ts"},"main":"./src/index.ts","name":"@tanda/wallet","private":true,"types":"./src/index.ts","scripts":{"test":"vitest run","typecheck":"tsc -p tsconfig.json --noEmit"},"type":"module","version":"0.1.0"}

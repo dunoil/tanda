@@ -1,0 +1,20 @@
+# Secrets: never commit. The agent wallet private key lives only in .env.
+.env
+.env.*
+!.env.example
+*.key
+secrets.*
+
+# Dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local data
+*.sqlite
+*.sqlite-journal
+data/
+
+# Logs and OS files
+*.log
+.DS_Store

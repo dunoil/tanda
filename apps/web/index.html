@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tanda: Human-Signed Agent Payouts to Rupiah</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>Tanda</h1>
+  <p class="tagline">Human-signed agent payouts to rupiah.</p>
+</header>
+<main>
+  <section>
+    <h2>What Tanda does</h2>
+    <p>
+      Tanda is a payout desk on Celo where an AI agent can only move money if a
+      verified human stands behind it. The agent pays in USDT over x402, Tanda
+      checks its Self Agent ID proof before serving it, converts the dollars to
+      IDRX over Textile FX, and pays an Indonesian freelancer in rupiah
+      stablecoin, with a public onchain receipt for every step.
+    </p>
+    <p>
+      Tanda is Indonesian for a sign, a mark, or a proof. The product is
+      literally about a human mark behind an agent.
+    </p>
+  </section>
+  <section>
+    <h2>Receipts</h2>
+    <p>Every settled job appears here with its verification tier and Celoscan links.</p>
+    <div id="receipts"><p>No settled jobs yet. The first payout lands during the build, see the project README.</p></div>
+  </section>
+  <section>
+    <h2>Counters</h2>
+    <ul>
+      <li>Settled jobs: <span id="count-jobs">0</span></li>
+      <li>IDRX payouts: <span id="count-payouts">0</span></li>
+      <li>Total moved: <span id="count-moved">0 USDT</span></li>
+    </ul>
+  </section>
+</main>
+<footer>
+  <p>Built for the Celo Agents Open for Business hackathon on Loops House. Tracks: Verified Agent Payments (Self Agent ID) and Stablecoin Corridors (Textile FX).</p>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>

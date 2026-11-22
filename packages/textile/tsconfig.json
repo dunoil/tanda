@@ -1,0 +1,1 @@
+{"compilerOptions":{"declaration":false,"outDir":"dist","paths":{"@tanda/money":["../money/src/index.ts"]}},"extends":"../../tsconfig.base.json","include":["src"]}

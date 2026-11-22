@@ -1,0 +1,1 @@
+{"compilerOptions":{"declaration":false,"outDir":"dist","paths":{"@tanda/identity":["../../packages/identity/src/index.ts"],"@tanda/money":["../../packages/money/src/index.ts"],"@tanda/textile":["../../packages/textile/src/index.ts"],"@tanda/wallet":["../../packages/wallet/src/index.ts"]},"types":["node"]},"extends":"../../tsconfig.base.json","include":["src"]}

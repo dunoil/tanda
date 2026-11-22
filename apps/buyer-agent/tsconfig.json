@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "outDir": "dist",
+    "paths": {
+      "@tanda/money": [
+        "../../packages/money/src/index.ts"
+      ],
+      "@tanda/wallet": [
+        "../../packages/wallet/src/index.ts"
+      ]
+    },
+    "types": [
+      "node"
+    ],
+    "declaration": false
+  },
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "src"
+  ]
+}
