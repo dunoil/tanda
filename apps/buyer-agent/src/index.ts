@@ -1,5 +1,6 @@
 import { privateKeyToAccount } from "viem/accounts";
 import type { Hex } from "viem";
+import { SelfAgent } from "@selfxyz/agent-sdk";
 import {
   ATTRIBUTION_CODE,
   assertAttributionCode,
@@ -63,11 +64,25 @@ async function main(): Promise<void> {
     }
     const network = (process.argv[4] ?? "testnet") as BuyerNetwork;
     const account = loadAccount();
+    // Sign the SelfAgent headers FRESH on every HTTP attempt. The desk's
+    // Self gate runs before its payment middleware and the verifier's
+    // replay protection keys on (signature, signed message), where the
+    // signed message covers the timestamp: one static signature reused
+    // on the paid retry is refused as "Replay detected" (proven on
+    // mainnet, EVIDENCE.md section 10). payForResource calls this
+    // provider once per attempt, so the 402 request and the paid retry
+    // each carry their own signature.
+    const selfAgent = new SelfAgent({
+      privateKey: process.env.AGENT_PRIVATE_KEY as Hex,
+      network,
+    });
     const result = await payForResource(url, {
       account,
       network,
       maxPerPayment: process.argv[5] ?? "2.00",
       body: JSON.stringify({ serviceId: "translation-check" }),
+      signHeaders: (req) =>
+        selfAgent.signRequest(req.method, req.url, req.body),
     });
     console.log(`Status: ${result.status}`);
     console.log(`Body: ${JSON.stringify(result.body)}`);

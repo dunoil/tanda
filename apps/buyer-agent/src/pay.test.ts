@@ -64,11 +64,84 @@ function stubDesk(amount: string, captured: { payload?: unknown }) {
 }
 
 function fetchFor(app: Hono) {
-  return (async (url: string, init?: RequestInit) =>
-    app.request(url, init)) as unknown as (
-    url: string,
+  return (async (input: string | Request, init?: RequestInit) =>
+    app.request(input, init)) as unknown as (
+    input: string | Request,
     init?: RequestInit,
   ) => Promise<Response>;
+}
+
+interface SelfAttempt {
+  signature: string | undefined;
+  timestamp: string | undefined;
+  hasPayment: boolean;
+}
+
+/** Stub desk that also records the Self headers of every attempt. */
+function stubDeskRecordingSelf(amount: string, attempts: SelfAttempt[]) {
+  const app = new Hono();
+  app.post("/desk/order", (c) => {
+    const payment = c.req.header("payment-signature");
+    attempts.push({
+      signature: c.req.header("x-self-agent-signature"),
+      timestamp: c.req.header("x-self-agent-timestamp"),
+      hasPayment: Boolean(payment),
+    });
+    if (!payment) {
+      const required = {
+        x402Version: 2,
+        error: "Payment required",
+        resource: {
+          url: URL,
+          description: "Tanda desk order",
+          mimeType: "application/json",
+        },
+        accepts: [
+          {
+            scheme: "exact",
+            network: "eip155:11142220",
+            amount,
+            asset: SEPOLIA_USDC,
+            payTo: PAY_TO,
+            maxTimeoutSeconds: 300,
+            extra: { name: "USDC", version: "2" },
+          },
+        ],
+        extensions: {},
+      };
+      return c.json({ error: "Payment required" }, 402, {
+        "payment-required": Buffer.from(JSON.stringify(required)).toString(
+          "base64",
+        ),
+      });
+    }
+    const receipt = { success: true, transaction: `0x${"ab".repeat(32)}` };
+    return c.json({ status: "order_created" }, 201, {
+      "payment-response": Buffer.from(JSON.stringify(receipt)).toString(
+        "base64",
+      ),
+    });
+  });
+  return app;
+}
+
+/**
+ * A Self signer in the SDK's shape: the signed message covers the
+ * millisecond timestamp, so a fresh timestamp yields a fresh signature
+ * and therefore a fresh verifier replay key (signature, message).
+ */
+function sdkShapedSigner(account: Account) {
+  return async (req: { method: string; url: string; body?: string }) => {
+    const timestamp = Date.now().toString();
+    const signature = await account.signMessage!({
+      message: `${timestamp}:${req.method}:${req.url}:${req.body ?? ""}`,
+    });
+    return {
+      "x-self-agent-address": account.address,
+      "x-self-agent-signature": signature,
+      "x-self-agent-timestamp": timestamp,
+    };
+  };
 }
 
 describe("buyer payment flow against a stub desk (testnet shape)", () => {
@@ -98,6 +171,66 @@ describe("buyer payment flow against a stub desk (testnet shape)", () => {
     expect(auth?.to).toBe(PAY_TO);
     expect(auth?.value).toBe("10000");
     expect(payload.payload?.signature).toMatch(/^0x[0-9a-f]+$/i);
+  });
+
+  it("signs the Self headers fresh on every attempt, so the paid retry is not a replay", async () => {
+    const account: Account = privateKeyToAccount(generatePrivateKey());
+    const attempts: SelfAttempt[] = [];
+    const result = await payForResource(URL, {
+      account,
+      network: "testnet",
+      body: JSON.stringify({ serviceId: "translation-check" }),
+      signHeaders: sdkShapedSigner(account),
+      fetchImpl: fetchFor(stubDeskRecordingSelf("10000", attempts)),
+    });
+    expect(result.status).toBe(201);
+    // Two attempts reached the desk: the 402 request and the paid retry.
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0].hasPayment).toBe(false);
+    expect(attempts[1].hasPayment).toBe(true);
+    // The verifier replay key is (signature, signed message) and the
+    // message covers the timestamp: both must differ across attempts,
+    // or the desk's gate refuses the retry with "Replay detected".
+    expect(attempts[0].signature).toBeTruthy();
+    expect(attempts[1].signature).toBeTruthy();
+    expect(attempts[1].signature).not.toBe(attempts[0].signature);
+    expect(attempts[1].timestamp).not.toBe(attempts[0].timestamp);
+    expect(Number(attempts[1].timestamp)).toBeGreaterThan(
+      Number(attempts[0].timestamp),
+    );
+  });
+
+  it("re-asks the signer when it returns a non-advancing timestamp", async () => {
+    const account: Account = privateKeyToAccount(generatePrivateKey());
+    const attempts: SelfAttempt[] = [];
+    const base = Date.now();
+    let calls = 0;
+    // Calls 1 and 2 return the same timestamp (a same-millisecond
+    // re-sign would reproduce the identical signature). The wrapper
+    // must wait and ask again until the timestamp advances.
+    const stubbornSigner = async () => {
+      calls++;
+      const ts = calls <= 2 ? base : base + calls;
+      return {
+        "x-self-agent-address": account.address,
+        "x-self-agent-signature": `0x${ts.toString(16)}`,
+        "x-self-agent-timestamp": String(ts),
+      };
+    };
+    const result = await payForResource(URL, {
+      account,
+      network: "testnet",
+      body: JSON.stringify({ serviceId: "translation-check" }),
+      signHeaders: stubbornSigner,
+      fetchImpl: fetchFor(stubDeskRecordingSelf("10000", attempts)),
+    });
+    expect(result.status).toBe(201);
+    expect(calls).toBeGreaterThanOrEqual(3);
+    expect(attempts).toHaveLength(2);
+    expect(Number(attempts[1].timestamp)).toBeGreaterThan(
+      Number(attempts[0].timestamp),
+    );
+    expect(attempts[1].signature).not.toBe(attempts[0].signature);
   });
 
   it("refuses a price above the per payment cap before signing", async () => {
