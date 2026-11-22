@@ -67,7 +67,15 @@ export function resolveX402Network(
 }
 
 export function hasX402ApiKey(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(env.X402_API_KEY && env.X402_API_KEY.startsWith("x402_"));
+  const key = env.X402_API_KEY;
+  if (!key) return false;
+  // Two legitimate shapes: the raw facilitator key itself ("x402_..."),
+  // and a Muse dynamic-credential surrogate ("hsurr:...") injected into
+  // this process environment by the vault launcher. A surrogate is not
+  // the key: Muse swaps it for the real credential on approved egress
+  // to the registered facilitator hosts, so this process never holds the
+  // raw key. Any other value is treated as no key.
+  return key.startsWith("x402_") || key.startsWith("hsurr:");
 }
 
 /**

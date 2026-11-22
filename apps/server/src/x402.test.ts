@@ -63,10 +63,22 @@ describe("desk route config", () => {
 });
 
 describe("API key boundary", () => {
-  it("hasX402ApiKey only accepts the x402_ key shape", () => {
+  it("hasX402ApiKey accepts the raw key shape and a vault surrogate, nothing else", () => {
     expect(hasX402ApiKey({})).toBe(false);
     expect(hasX402ApiKey({ X402_API_KEY: "nope" })).toBe(false);
     expect(hasX402ApiKey({ X402_API_KEY: "x402_test_placeholder" })).toBe(true);
+    // A Muse dynamic-credential surrogate injected by the vault launcher
+    // counts as a key: egress swaps it for the real credential, so the
+    // server process never holds the raw key.
+    expect(hasX402ApiKey({ X402_API_KEY: "hsurr:test-surrogate" })).toBe(true);
+    expect(hasX402ApiKey({ X402_API_KEY: "hsurrx:test" })).toBe(false);
+  });
+
+  it("settlement readiness is ready with a vault surrogate", () => {
+    const readiness = settlementReadiness({
+      X402_API_KEY: "hsurr:test-surrogate",
+    });
+    expect(readiness.ready).toBe(true);
   });
 
   it("settlement readiness names the human step when the key is missing", () => {
