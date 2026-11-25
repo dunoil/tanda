@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tanda: Human-Signed Agent Payouts to Rupiah</title>
+<style>body{font-family:Georgia,serif;max-width:640px;margin:64px auto;padding:0 24px;color:#1f2a22;background:#eef1ea}h1{font-size:2em}a{color:#3f6b4a}.tag{color:#8a6a3b;font-weight:bold}code{background:#d9e0d4;padding:2px 6px}</style>
+</head>
+<body>
+<p class="tag">TANDA</p>
+<h1>Human-signed agent payouts to rupiah</h1>
+<p>Tanda is a payout desk on Celo where an AI agent can only move money if a verified human stands behind it. The agent pays in USDT over x402, Tanda checks its Self Agent ID proof before serving it, converts the dollars to IDRX over Textile FX, and pays an Indonesian freelancer in rupiah stablecoin, with a public onchain receipt for every step.</p>
+<h2>How it works</h2>
+<ol>
+<li>A buyer agent calls the desk with a Self Agent signed request.</li>
+<li>The desk verifies the Self Agent ID proof on Celo mainnet. No proof, no payout endpoint.</li>
+<li>On a pass, the desk answers HTTP 402 with a priced payment requirement in USDT, settled through the Celo x402 facilitator.</li>
+<li>When the job completes, the desk takes a firm Textile RFQ quote for USDT to IDRX and converts from its own wallet.</li>
+<li>The desk transfers the IDRX to the freelancer and writes ERC-8004 reputation feedback, only after a settled job.</li>
+<li>Every step lands on the public receipts page with Celoscan links.</li>
+</ol>
+<p>Built for the Celo Agents Open for Business hackathon. Proven live: a 0.10 USDT payment settled onchain.</p>
+<p><a href="https://github.com/dunoil/tanda">Source code on GitHub</a> &middot; <a href="https://github.com/dunoil">Duan (@dunoil)</a></p>
+</body>
+</html>
